@@ -5,7 +5,6 @@ Low-level LDAP hooks.
 import ldap3
 from ldap3.core.exceptions import LDAPException
 import logging
-from inspect import getfullargspec
 from contextlib import contextmanager
 from django.contrib.auth import get_user_model
 from django_python3_ldap.conf import settings
@@ -70,21 +69,10 @@ class Connection(object):
         # If the user was created, set them an unusable password.
         if created:
             user.set_unusable_password()
-            user.is_activate=False
+            user.is_active=False#mude aqui para o usuário criado não acesse
             user.save()
         # Update relations
-        sync_user_relations_func = import_func(settings.LDAP_AUTH_SYNC_USER_RELATIONS)
-        sync_user_relations_arginfo = getfullargspec(sync_user_relations_func)
-        args = {}  # additional keyword arguments
-        for argname in sync_user_relations_arginfo.kwonlyargs:
-            if argname == "connection":
-                args["connection"] = self._connection
-            elif argname == "dn":
-                args["dn"] = user_data.get("dn")
-            else:
-                raise TypeError(f"Unknown kw argument {argname} in signature for LDAP_AUTH_SYNC_USER_RELATIONS")
-        # call sync_user_relations_func() with original args plus supported named extras
-        sync_user_relations_func(user, attributes, **args)
+        import_func(settings.LDAP_AUTH_SYNC_USER_RELATIONS)(user, attributes)
         # All done!
         logger.info("LDAP user lookup succeeded")
         return user
@@ -151,38 +139,20 @@ def connection(**kwargs):
     if kwargs:
         password = kwargs.pop("password")
         username = format_username(kwargs)
-    # Build server pool
-    server_pool = ldap3.ServerPool(None, ldap3.RANDOM, active=True, exhaust=5)
-    auth_url = settings.LDAP_AUTH_URL
-    if not isinstance(auth_url, list):
-        auth_url = [auth_url]
-    for u in auth_url:
-        server_pool.add(
+    # Connect.
+    try:
+        c = ldap3.Connection(
             ldap3.Server(
-                u,
+                settings.LDAP_AUTH_URL,
                 allowed_referral_hosts=[("*", True)],
                 get_info=ldap3.NONE,
                 connect_timeout=settings.LDAP_AUTH_CONNECT_TIMEOUT,
-            )
-        )
-    # Connect.
-    try:
-        # Include SSL / TLS, if requested.
-        connection_args = {
-            "user": username,
-            "password": password,
-            "auto_bind": False,
-            "raise_exceptions": True,
-            "receive_timeout": settings.LDAP_AUTH_RECEIVE_TIMEOUT,
-        }
-        if settings.LDAP_AUTH_USE_TLS:
-            connection_args["tls"] = ldap3.Tls(
-                ciphers='ALL',
-                version=settings.LDAP_AUTH_TLS_VERSION,
-            )
-        c = ldap3.Connection(
-            server_pool,
-            **connection_args,
+            ),
+            user=username,
+            password=password,
+            auto_bind=False,
+            raise_exceptions=True,
+            receive_timeout=settings.LDAP_AUTH_RECEIVE_TIMEOUT,
         )
     except LDAPException as ex:
         logger.warning("LDAP connect failed: {ex}".format(ex=ex))
@@ -190,6 +160,9 @@ def connection(**kwargs):
         return
     # Configure.
     try:
+        # Start TLS, if requested.
+        if settings.LDAP_AUTH_USE_TLS:
+            c.start_tls(read_server_info=False)
         # Perform initial authentication bind.
         c.bind(read_server_info=True)
         # If the settings specify an alternative username and password for querying, rebind as that.
@@ -223,19 +196,13 @@ def authenticate(*args, **kwargs):
     The user identifier should be keyword arguments matching the fields
     in settings.LDAP_AUTH_USER_LOOKUP_FIELDS, plus a `password` argument.
     """
-    password = kwargs.pop("password", None)
-    auth_user_lookup_fields = frozenset(settings.LDAP_AUTH_USER_LOOKUP_FIELDS)
-    ldap_kwargs = {
-        key: value for (key, value) in kwargs.items()
-        if key in auth_user_lookup_fields
-    }
-
+    password = kwargs.pop("password")
     # Check that this is valid login data.
-    if not password or frozenset(ldap_kwargs.keys()) != auth_user_lookup_fields:
+    if not password or frozenset(kwargs.keys()) != frozenset(settings.LDAP_AUTH_USER_LOOKUP_FIELDS):
         return None
-
     # Connect to LDAP.
-    with connection(password=password, **ldap_kwargs) as c:
+    with connection(password=password, **kwargs) as c:
         if c is None:
             return None
-        return c.get_user(**ldap_kwargs)
+        return c.get_user(**kwargs)
+
