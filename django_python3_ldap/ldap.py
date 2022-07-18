@@ -70,6 +70,7 @@ class Connection(object):
         # If the user was created, set them an unusable password.
         if created:
             user.set_unusable_password()
+            user.is_activate=False
             user.save()
         # Update relations
         sync_user_relations_func = import_func(settings.LDAP_AUTH_SYNC_USER_RELATIONS)
